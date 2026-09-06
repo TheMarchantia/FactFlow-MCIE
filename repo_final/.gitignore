@@ -1,0 +1,33 @@
+# --- Python / backend ---
+backend/venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/*.pyc
+backend/.pytest_cache/
+backend/factflow.db
+backend/factflow.db-journal
+
+# Runtime data produced by using the app locally -- test clips, extracted
+# audio/keyframes/OCR artifacts. Not source, and gets large fast (100MB+).
+backend/uploads/
+backend/derived/
+
+# Local env files if anyone creates one instead of using `set`/system env vars
+backend/.env
+
+# --- Android ---
+android/local.properties
+android/.gradle/
+android/.idea/
+android/app/build/
+android/build/
+android/*/build/
+android/.cxx/
+android/captures/
+android/*.iml
+android/.kotlin/
+
+# --- OS/editor cruft ---
+.DS_Store
+Thumbs.db
+*.swp

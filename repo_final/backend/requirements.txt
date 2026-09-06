@@ -1,0 +1,42 @@
+fastapi
+uvicorn[standard]
+sqlalchemy[asyncio]
+aiosqlite
+python-multipart
+aiofiles
+pydantic
+httpx
+
+# Section 8: Gemini reasoning provider (app/reasoning/gemini_client.py)
+# calls the Gemini REST API directly via httpx (listed above), avoiding
+# the protobuf version conflict between google-generativeai and PaddlePaddle.
+
+pytest
+pytest-asyncio
+spacy
+# After installing requirements, download the small English model used by
+# app/mcie/explicit_claim_detector.py's rule-based named-entity check:
+#   python -m spacy download en_core_web_sm
+
+# Section 5.3 on-screen text extraction (app/preprocessing/ocr.py). Pinned
+# to the stable 2.x API rather than the newer 3.x PaddleX-pipeline-based
+# line, which has a different internal architecture. numpy<2 is required
+# for ABI compatibility with this paddleocr/paddlepaddle version pair.
+#
+# paddlepaddle is deliberately pinned too, not left open: an unpinned
+# install pulls whatever is latest, and PaddlePaddle 3.x's oneDNN/PIR
+# execution engine is not backward-compatible with this generation of
+# PP-OCR det/rec models -- it fails every inference with "OneDnnContext
+# does not have the input Filter" (operator <fused_conv2d> error), since
+# the fused-conv op is baked into the model graph itself and the newer
+# engine expects a different op interface for it. 2.6.1 is a version
+# multiple other real paddleocr==2.7.3 deployments pin to specifically to
+# avoid this.
+paddleocr==2.7.3
+paddlepaddle==2.6.2
+numpy<2
+# On first use, PaddleOCR downloads ~10-15MB of detection + recognition
+# model weights from paddleocr.bj.bcebos.com -- this requires outbound
+# network access to that host the first time a clip is processed. In a
+# restricted/offline environment, pre-download the models or point
+# PaddleOCR at a local model directory instead.

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="verdict_true">#4CAF50</color>
+    <color name="verdict_false">#F44336</color>
+    <color name="verdict_misleading">#FFEB3B</color>
+    <color name="verdict_inconclusive">#FFFFFF</color>
+    <color name="grey">#9E9E9E</color>
+    <color name="red">#FF0000</color>
+</resources>

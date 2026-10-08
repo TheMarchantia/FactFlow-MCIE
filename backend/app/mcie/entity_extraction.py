@@ -85,8 +85,31 @@ def _resolve_relative_date(marker: str) -> Optional[str]:
     return resolved_dt.date().isoformat()
 
 
+# Regex to match standalone clock times (11:34, 4:59, 00:04) so they are not treated as factual figures
+_CLOCK_PATTERN = re.compile(r"\b\d{1,2}:\d{2}(?::\d{2})?(?:\s*[ap]m)?\b", re.IGNORECASE)
+_RESOLUTION_PATTERN = re.compile(r"\b\d{3,4}p\b", re.IGNORECASE)
+_SUBSTANTIVE_NUMBER_PATTERN = re.compile(
+    r"\b\d+(?:,\d{3})*(?:\.\d+)?(?:\s*(?:billion|billions|million|millions|trillion|percent|%|dollars?|usd|deaths?|killed|people))?\b",
+    re.IGNORECASE,
+)
+
+
 def _extract_numbers(text: str) -> List[str]:
-    return _NUMBER_PATTERN.findall(text)
+    # 1. Mask out clocks and video resolution labels
+    cleaned = _CLOCK_PATTERN.sub(" ", text)
+    cleaned = _RESOLUTION_PATTERN.sub(" ", cleaned)
+
+    matches = _SUBSTANTIVE_NUMBER_PATTERN.findall(cleaned)
+    results: List[str] = []
+    for m in matches:
+        m_str = m.strip()
+        if not m_str:
+            continue
+        # Skip lone small digits (e.g. '0', '4', '6') that are usually UI remnants unless accompanied by units
+        if m_str.isdigit() and len(m_str) == 1:
+            continue
+        results.append(m_str)
+    return results
 
 
 def _extract_with_spacy(text: str) -> Tuple[
@@ -108,8 +131,6 @@ def _extract_with_spacy(text: str) -> Tuple[
         elif ent.label_ == "ORG":
             organizations.append(ent.text)
         elif date_pair is None and ent.label_ in _DATE_LABELS:
-            # spaCy's DATE/TIME span may or may not be one of our known
-            # relative markers; only markers we recognize get resolved.
             marker = _find_temporal_marker(ent.text) or ent.text.lower()
             date_pair = (marker, _resolve_relative_date(marker))
 
@@ -126,10 +147,6 @@ def _extract_claim_entities(text: str) -> Dict[str, Any]:
     if _NLP is not None:
         location_value, people, organizations, date_pair = _extract_with_spacy(text)
 
-    # Lexical fallback / supplement: always run the temporal-marker and
-    # event-noun scans, same as explicit_claim_detector.py's keyword-list
-    # style, since spaCy's DATE ents don't reliably catch things like
-    # "this morning" and never catch our EVENT_NOUNS at all.
     if date_pair is None:
         marker = _find_temporal_marker(text)
         if marker is not None:
@@ -152,20 +169,28 @@ def _extract_claim_entities(text: str) -> Dict[str, Any]:
     }
 
 
-async def run(ecd_out: Dict[str, Any], icd_out: Dict[str, Any]) -> Dict[str, Any]:
+async def run(
+    ecd_out: Dict[str, Any],
+    icd_out: Dict[str, Any],
+    primary_claim: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """
     Extract entities from claims (Section 6.7).
 
-    Runs spaCy NER (with a lexical fallback when the model isn't available)
-    over every claim in ecd_out["explicit_claims"], then merges the results:
-    list-valued fields (people/organizations/numbers) are unioned across all
-    claims, and single-value fields (event/location/date) take the first
-    non-null value found, in claim order. implied_claims (icd_out) is
-    currently always empty upstream, so it isn't consulted yet; once
-    implied_claim_detector.py is real this should fold its {"text": ...}
-    entries in the same way as explicit claims.
+    Runs spaCy NER (with a lexical fallback when the model isn't available).
+    If a primary_claim is provided (from Claim Arbitrator), its entities take
+    highest priority to ensure downstream queries focus cleanly on the verified target.
     """
-    claims = ecd_out.get("explicit_claims") or []
+    claims: List[Dict[str, Any]] = []
+    if primary_claim and primary_claim.get("text"):
+        claims.append(primary_claim)
+
+    for c in (ecd_out.get("explicit_claims") or []):
+        if c not in claims:
+            claims.append(c)
+    for c in (icd_out.get("implied_claims") or []):
+        if c not in claims:
+            claims.append(c)
 
     event: Optional[str] = None
     location: Optional[Dict[str, Any]] = None

@@ -32,13 +32,14 @@ async def run(mcie_out: Dict[str, Any]) -> Dict[str, Any]:
     all_refs: List[str] = mcie_out.get("keyframe_refs") or []
     context_units: List[Dict[str, Any]] = mcie_out.get("context_units") or []
     explicit_claims: List[Dict[str, Any]] = mcie_out.get("explicit_claims") or []
+    implied_claims: List[Dict[str, Any]] = mcie_out.get("implied_claims") or []
 
     if not all_refs:
         return {"priority_keyframes": []}
 
-    # No claims or no context to score against — return all, unchanged.
-    if not explicit_claims or not context_units:
-        return {"priority_keyframes": list(all_refs)}
+    # No claims or no context to score against — return top frames unchanged.
+    if (not explicit_claims and not implied_claims) or not context_units:
+        return {"priority_keyframes": list(all_refs[:2]) if len(all_refs) > 2 else list(all_refs)}
 
     # Tier 1: keyframes inside windows that carry speech or OCR text
     # (the windows where a claim is most likely to have been detected).
@@ -56,4 +57,7 @@ async def run(mcie_out: Dict[str, Any]) -> Dict[str, Any]:
         if ref not in priority:
             priority.append(ref)
 
-    return {"priority_keyframes": priority}
+    # Section 7.3: Select a compact subset (central frame + supporting frame)
+    # to keep verification package focused.
+    selected = priority[:2] if len(priority) >= 2 else priority
+    return {"priority_keyframes": selected}

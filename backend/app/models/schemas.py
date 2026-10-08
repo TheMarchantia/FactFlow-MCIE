@@ -27,6 +27,8 @@ class ClaimVerdict(BaseModel):
     verdict: str
     confidence: int
     summary: str
+    short_summary: Optional[str] = None
+    detailed_summary: Optional[str] = None
     sources: List[Source]
 
 class VerdictResponse(BaseModel):
@@ -37,6 +39,12 @@ class HistoryItem(BaseModel):
     clip_id: str
     verdict: str
     generated_at: str
+    claim_text: Optional[str] = None
+    confidence: Optional[int] = None
+    summary: Optional[str] = None
+    short_summary: Optional[str] = None
+    detailed_summary: Optional[str] = None
+    sources: List[Source] = []
 
 class HistoryResponse(BaseModel):
     total: int
@@ -79,5 +87,7 @@ class Verdict(Base):
     verdict = Column(String)
     confidence = Column(Float)
     summary = Column(String)
+    short_summary = Column(String, nullable=True)
+    detailed_summary = Column(String, nullable=True)
     sources = Column(JSON)
     generated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))

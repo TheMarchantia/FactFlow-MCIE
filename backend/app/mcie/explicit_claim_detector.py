@@ -21,19 +21,33 @@ _TEMPORAL_MARKERS = (
 
 # Section 6.5.1: "named-entity-plus-event patterns" -- event nouns that,
 # combined with a recognized entity (place/org/person), indicate a checkable
-# event claim (e.g. "Flood in Mumbai").
+# event claim (e.g. "Flood in Mumbai"). Expanded across public events,
+# health, politics, business, and discoveries.
 _EVENT_NOUNS = (
+    # Disasters & public events
     "flood", "floods", "flooding", "earthquake", "protest", "protests",
     "fire", "explosion", "riot", "riots", "attack", "storm", "cyclone",
-    "landslide", "collapse", "outbreak", "shooting", "crash",
+    "landslide", "collapse", "outbreak", "shooting", "crash", "war", "bombing",
+    "strike", "collision", "hurricane", "tornado", "tsunami",
+    # Health & Medical
+    "cure", "cures", "curing", "cancer", "vaccine", "vaccines", "virus",
+    "disease", "infection", "poison", "toxic", "banned", "fatal",
+    # Governance & Legal
+    "resigned", "resignation", "arrested", "arrest", "impeached", "indicted",
+    "convicted", "elected", "sanctions", "sanctioned", "assassinated",
+    # Tech, Business, Discovery
+    "acquired", "bought", "bankrupt", "bankruptcy", "released", "releases", "launched",
+    "launches", "sued", "lawsuit", "discovered", "discovery", "beats", "outlasts"
 )
 
 # Section 6.5.1: "numeric assertions" -- a number attached to a unit/outcome
-# word, e.g. "6.2 magnitude", "50 people killed".
+# word, e.g. "6.2 magnitude", "50 people killed", "50 billion dollars".
 _UNIT_WORDS = (
     "magnitude", "percent", "%", "people", "killed", "dead", "injured",
     "degrees", "degree", "km", "kg", "meters", "metres", "feet", "richter",
-    "casualties",
+    "casualties", "dollar", "dollars", "$", "usd", "euro", "euros", "inr",
+    "rupee", "rupees", "billion", "billions", "million", "millions", "trillion",
+    "cases", "deaths", "votes", "seats", "tons", "acres", "miles",
 )
 _NUMBER_PATTERN = re.compile(r"\b\d+(?:\.\d+)?\b")
 
@@ -58,10 +72,6 @@ def _has_event_entity_pattern(text: str) -> Tuple[bool, List[str]]:
     """
     Named-entity-plus-event pattern (Section 6.5.1): an event noun
     co-occurring with a location/org/person entity, e.g. "Flood in Mumbai".
-
-    Falls back to a lexical-only check (event noun present, entity check
-    skipped) if the spaCy model isn't available in this environment, so the
-    detector degrades gracefully rather than failing outright.
     """
     lowered = text.lower()
     found_events = [word for word in _EVENT_NOUNS if word in lowered]
@@ -90,21 +100,16 @@ def _claim_source(unit: Dict[str, Any]) -> str:
     return "unknown"
 
 
-def _detect_claims_in_unit(unit: Dict[str, Any]) -> List[Dict[str, Any]]:
-    speech_text = " ".join(unit.get("speech_segments", []))
-    ocr_text = " ".join(unit.get("ocr_segments", []))
-    combined = " ".join(t for t in (speech_text, ocr_text) if t).strip()
+def _evaluate_candidate_text(text: str) -> Optional[Dict[str, Any]]:
+    """Determine if a single sentence or fragment satisfies explicit claim patterns."""
+    text_clean = text.strip()
+    if not text_clean or len(text_clean.split()) < 2:
+        return None
 
-    if not combined:
-        return []
+    numeric = _has_numeric_assertion(text_clean)
+    event_pattern, _event_words = _has_event_entity_pattern(text_clean)
+    temporal = _has_temporal_marker(text_clean)
 
-    numeric = _has_numeric_assertion(combined)
-    event_pattern, _event_words = _has_event_entity_pattern(combined)
-    temporal = _has_temporal_marker(combined)
-
-    # Confidence here is a fixed, deterministic value per matched pattern --
-    # NOT a model self-reported score. The Confidence Estimator (Section 6.9,
-    # out of scope for this task) is what combines/adjusts these later.
     if numeric:
         confidence = 0.8
     elif event_pattern and temporal:
@@ -112,19 +117,71 @@ def _detect_claims_in_unit(unit: Dict[str, Any]) -> List[Dict[str, Any]]:
     elif event_pattern:
         confidence = 0.6
     else:
-        # No confident, explicitly-stated claim in this unit. This is the
-        # correct outcome for context units where the claim only exists at
-        # the intersection of text AND visual content (Section 6.3's running
-        # example) -- that case is handled by Implied Claim Detection
-        # (Section 6.6) and the LLM-assisted layer (Section 6.5.2), neither
-        # of which are in scope for this rule-based-only stage.
+        return None
+
+    return {
+        "text": text_clean,
+        "confidence": confidence,
+    }
+
+
+def _split_into_sentences(text: str) -> List[str]:
+    """Split text into sentences using punctuation boundaries."""
+    raw = re.split(r"(?<=[.!?])\s+", text.strip())
+    return [s.strip() for s in raw if s.strip()]
+
+
+def _detect_claims_in_unit(unit: Dict[str, Any]) -> List[Dict[str, Any]]:
+    speech_segments = [s for s in unit.get("speech_segments", []) if s and not (s.strip().startswith("[") and s.strip().endswith("]"))]
+    ocr_segments = [s for s in unit.get("ocr_segments", []) if s and not (s.strip().startswith("[") and s.strip().endswith("]"))]
+
+    source = _claim_source(unit)
+    speech_text = " ".join(speech_segments).strip()
+    ocr_text = " ".join(ocr_segments).strip()
+    combined = " ".join(t for t in (speech_text, ocr_text) if t).strip()
+
+    if not combined:
         return []
 
-    return [{
-        "text": combined,
-        "source": _claim_source(unit),
-        "confidence": confidence,
-    }]
+    # If cross-modal (both speech and OCR present), preserve the combined context
+    # so cross-modal disagreement (e.g. speech: Mumbai, OCR: Delhi) is captured
+    if source == "asr+ocr":
+        match = _evaluate_candidate_text(combined)
+        if match:
+            return [{
+                "text": combined,
+                "source": source,
+                "confidence": match["confidence"],
+            }]
+
+    # For single-modality units, check individual sentences first for clean assertions
+    candidates: List[str] = []
+    for seg in speech_segments + ocr_segments:
+        candidates.extend(_split_into_sentences(seg))
+
+    claims: List[Dict[str, Any]] = []
+    for cand in candidates:
+        match = _evaluate_candidate_text(cand)
+        if match:
+            claims.append({
+                "text": match["text"],
+                "source": source,
+                "confidence": match["confidence"],
+            })
+
+    if claims:
+        return claims
+
+    # Fallback to combined text
+    match = _evaluate_candidate_text(combined)
+    if match:
+        return [{
+            "text": match["text"],
+            "source": source,
+            "confidence": match["confidence"],
+        }]
+
+    return []
 
 
 async def run(cb_out: Dict[str, Any], vc_out: Dict[str, Any]) -> Dict[str, Any]:

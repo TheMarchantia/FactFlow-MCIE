@@ -169,6 +169,8 @@ def _parse_json(json_path: Path) -> list[dict[str, Any]]:
             start_ms is None
             or end_ms is None
             or not text
+            or text.upper() in {"[BLANK_AUDIO]", "[MUSIC]", "[APPLAUSE]", "[LAUGHTER]", "[SILENCE]", "(SILENCE)"}
+            or (text.startswith("[") and text.endswith("]"))
         ):
             continue
 

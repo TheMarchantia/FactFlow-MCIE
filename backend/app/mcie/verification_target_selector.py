@@ -39,7 +39,7 @@ from typing import Any, Dict, List, Optional, Tuple
 #        A claim was detected but carries none of the above entities.
 
 
-def _classify(entities: Dict[str, Any]) -> Tuple[str, str]:
+def _classify(entities: Dict[str, Any], primary_text: Optional[str] = None) -> Tuple[str, str]:
     date = entities.get("date")
     numbers: List[str] = entities.get("numbers") or []
     location = entities.get("location")
@@ -47,37 +47,55 @@ def _classify(entities: Dict[str, Any]) -> Tuple[str, str]:
     people: List[str] = entities.get("people") or []
     organizations: List[str] = entities.get("organizations") or []
 
-    if date is not None:
+    # If date is present alongside an event or location -> event date verification
+    if date is not None and (event is not None or location is not None):
         return "event_claim", "date_of_event"
+
+    # If numbers/statistics are prominently asserted
     if numbers:
         return "statistical_claim", "numeric_assertion"
-    if location is not None:
+
+    # If location + event
+    if location is not None and event is not None:
         return "event_claim", "location_of_event"
+
+    # Event occurrence
     if event is not None:
         return "event_claim", "event_occurrence"
+
+    # People / Organizations
     if people:
         return "identity_claim", "person_identity"
     if organizations:
         return "identity_claim", "organization_identity"
+
+    # If date was mentioned without explicit event/location
+    if date is not None:
+        return "event_claim", "date_of_event"
+
     return "general_claim", "general_verification"
 
 
-async def run(ecd_out: Dict[str, Any], ee_out: Dict[str, Any]) -> Dict[str, Any]:
+async def run(
+    ecd_out: Dict[str, Any],
+    ee_out: Dict[str, Any],
+    icd_out: Optional[Dict[str, Any]] = None,
+    primary_claim: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """
     Select claim_type + verification_target (Section 6.8).
 
-    If no explicit claim was detected at all, there is nothing to select a
-    verification target for -- return both fields as None rather than
-    guessing "event_claim" the way the old stub always did. Otherwise,
-    classify using the aggregated entities from Entity Extraction (ee_out),
-    which already merges signals across every claim in ecd_out.
+    If no explicit, implied, or primary claim was detected at all, return
+    None for both fields. Otherwise classify using entities and primary claim context.
     """
     explicit_claims = ecd_out.get("explicit_claims") or []
-    if not explicit_claims:
+    implied_claims = (icd_out.get("implied_claims") or []) if icd_out else []
+    if not explicit_claims and not implied_claims and not primary_claim:
         return {"claim_type": None, "verification_target": None}
 
     entities = ee_out.get("entities") or {}
-    claim_type, verification_target = _classify(entities)
+    primary_text = primary_claim.get("text") if primary_claim else None
+    claim_type, verification_target = _classify(entities, primary_text)
 
     return {
         "claim_type": claim_type,

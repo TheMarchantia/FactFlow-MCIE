@@ -70,8 +70,14 @@ async def run(mcie_out: Dict[str, Any], query: str, ks_out: Dict[str, Any]) -> D
         "verification_query": query,
         "claim_type": mcie_out.get("claim_type"),
         "verification_target": mcie_out.get("verification_target"),
-        "explicit_claims": [c["text"] for c in mcie_out.get("explicit_claims", [])],
-        "implied_claims": mcie_out.get("implied_claims", []),
+        "explicit_claims": [
+            c["text"] if isinstance(c, dict) else str(c)
+            for c in mcie_out.get("explicit_claims", [])
+        ],
+        "implied_claims": [
+            c["text"] if isinstance(c, dict) else str(c)
+            for c in mcie_out.get("implied_claims", [])
+        ],
         "entities": {
             "event": entities.get("event"),
             "location": _location_value(entities),

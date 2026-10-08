@@ -36,31 +36,57 @@ def _event_str(entities: Dict[str, Any]) -> str:
 
 
 def _event_date_query(entities: Dict[str, Any], claim_text: Optional[str]) -> str:
-    event = _event_str(entities)
+    event = entities.get("event")
     location = _location_str(entities)
     date = _date_str(entities)
+    if claim_text:
+        event_clause = f"{event} occurred" if event else "this occurred"
+        loc_clause = f" in {location}" if location != "the claimed location" else ""
+        return (
+            f"Verify the claim: \"{claim_text}\". Specifically confirm whether {event_clause}"
+            f"{loc_clause} on {date}. If the footage shown matches an earlier "
+            f"or different event, identify its true date and location and cite sources."
+        )
+    event_str = _event_str(entities)
     return (
-        f"Verify whether {event} occurred in {location} on {date}. If the "
+        f"Verify whether {event_str} occurred in {location} on {date}. If the "
         f"footage shown matches an earlier or different event, identify its "
         f"true date and location and cite sources."
     )
 
 
 def _event_location_query(entities: Dict[str, Any], claim_text: Optional[str]) -> str:
-    event = _event_str(entities)
+    event = entities.get("event")
     location = _location_str(entities)
+    if claim_text:
+        event_clause = f"{event} occurred" if event else "this occurred"
+        loc_clause = f" in {location}" if location != "the claimed location" else " as claimed"
+        return (
+            f"Verify the claim: \"{claim_text}\". Specifically confirm whether {event_clause}"
+            f"{loc_clause}. If the footage shown is from a different "
+            f"location, identify the correct location and cite sources."
+        )
+    event_str = _event_str(entities)
     return (
-        f"Verify whether {event} occurred in {location} as claimed. If the "
+        f"Verify whether {event_str} occurred in {location} as claimed. If the "
         f"footage shown is from a different location, identify the correct "
         f"location and cite sources."
     )
 
 
 def _event_occurrence_query(entities: Dict[str, Any], claim_text: Optional[str]) -> str:
-    event = _event_str(entities)
+    event = entities.get("event")
+    if claim_text:
+        event_clause = f"{event}" if event else "this event"
+        return (
+            f"Verify the claim: \"{claim_text}\". Specifically confirm whether {event_clause} "
+            f"actually occurred as described in this clip. If the footage does not depict "
+            f"{event_clause}, identify what it actually shows and cite sources."
+        )
+    event_str = _event_str(entities)
     return (
-        f"Verify whether {event} actually occurred as described in this "
-        f"clip. If the footage does not depict {event}, identify what it "
+        f"Verify whether {event_str} actually occurred as described in this "
+        f"clip. If the footage does not depict {event_str}, identify what it "
         f"actually shows and cite sources."
     )
 
@@ -70,6 +96,12 @@ def _statistical_query(entities: Dict[str, Any], claim_text: Optional[str]) -> s
     number_str = ", ".join(numbers) if numbers else "the figure cited"
     event = entities.get("event")
     subject = f"the {event}" if event else "this claim"
+    if claim_text:
+        return (
+            f"Verify the claim: \"{claim_text}\". Specifically verify the figure(s) {number_str} "
+            f"cited in relation to {subject}. Confirm whether official or reliable sources "
+            f"report the same number, and cite sources."
+        )
     return (
         f"Verify the figure(s) {number_str} cited in relation to {subject}. "
         f"Confirm whether official or reliable sources report the same "
@@ -80,6 +112,11 @@ def _statistical_query(entities: Dict[str, Any], claim_text: Optional[str]) -> s
 def _identity_person_query(entities: Dict[str, Any], claim_text: Optional[str]) -> str:
     people: List[str] = entities.get("people") or []
     names = ", ".join(people) if people else "the named person"
+    if claim_text:
+        return (
+            f"Verify the claim: \"{claim_text}\". Specifically confirm the identity and claimed "
+            f"involvement of {names} in this clip, and cite sources."
+        )
     return (
         f"Verify the identity and claimed involvement of {names} in this "
         f"clip. Confirm whether the person shown or named is correctly "
@@ -90,6 +127,11 @@ def _identity_person_query(entities: Dict[str, Any], claim_text: Optional[str]) 
 def _identity_org_query(entities: Dict[str, Any], claim_text: Optional[str]) -> str:
     organizations: List[str] = entities.get("organizations") or []
     names = ", ".join(organizations) if organizations else "the named organization"
+    if claim_text:
+        return (
+            f"Verify the claim: \"{claim_text}\". Specifically confirm the claimed involvement "
+            f"of {names} in this clip, and cite sources."
+        )
     return (
         f"Verify the claimed involvement of {names} in this clip. Confirm "
         f"whether the organization is accurately represented, and cite "
@@ -145,9 +187,27 @@ def _no_claim_query(mcie_out: Dict[str, Any]) -> str:
 
 
 def _primary_claim_text(mcie_out: Dict[str, Any]) -> Optional[str]:
+    primary = mcie_out.get("primary_claim")
+    if primary:
+        if isinstance(primary, dict) and primary.get("text"):
+            return primary["text"]
+        elif isinstance(primary, str) and primary.strip():
+            return primary.strip()
+
+    ranked = mcie_out.get("ranked_claims") or []
+    if ranked:
+        first = ranked[0]
+        return first.get("text") if isinstance(first, dict) else str(first)
+
     explicit_claims = mcie_out.get("explicit_claims") or []
     if explicit_claims:
         return explicit_claims[0].get("text")
+
+    implied_claims = mcie_out.get("implied_claims") or []
+    if implied_claims:
+        first = implied_claims[0]
+        return first.get("text") if isinstance(first, dict) else str(first)
+
     return None
 
 

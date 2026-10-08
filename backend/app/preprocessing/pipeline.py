@@ -22,10 +22,10 @@ FFMPEG_BIN = os.getenv("FACTFLOW_FFMPEG_BIN", "ffmpeg")
 FFPROBE_BIN = os.getenv("FACTFLOW_FFPROBE_BIN", "ffprobe")
 
 KEYFRAME_INTERVAL_SEC = float(
-    os.getenv("FACTFLOW_KEYFRAME_INTERVAL_SEC", "4")
+    os.getenv("FACTFLOW_KEYFRAME_INTERVAL_SEC", "0.8")
 )
 
-MAX_CANDIDATE_KEYFRAMES = 6
+MAX_CANDIDATE_KEYFRAMES = 15
 
 
 def _require_binary(binary: str) -> str:
@@ -185,6 +185,7 @@ def _candidate_timestamps(
 async def run(
     clip_path: str,
     output_dir: Path | None = None,
+    audio_path_override: str | None = None,
 ) -> Dict[str, Any]:
     """
     Build the FactFlow preprocessing contract.
@@ -247,12 +248,28 @@ async def run(
     audio_path: Path | None = None
     transcript: list[dict[str, Any]] = []
 
-    if metadata["has_audio"]:
-
-        audio_path = (
-            artifact_dir / "audio.wav"
+    has_audio_input = False
+    if audio_path_override and Path(audio_path_override).is_file() and Path(audio_path_override).stat().st_size > 44:
+        has_audio_input = True
+        audio_path = artifact_dir / "audio.wav"
+        await _run_command(
+            [
+                ffmpeg,
+                "-y",
+                "-i",
+                str(audio_path_override),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                str(audio_path),
+            ],
+            "FFmpeg internal audio normalization to 16kHz WAV",
         )
-
+    elif metadata["has_audio"]:
+        has_audio_input = True
+        audio_path = artifact_dir / "audio.wav"
         await _run_command(
             [
                 ffmpeg,
@@ -269,18 +286,13 @@ async def run(
             "FFmpeg audio extraction",
         )
 
+    if has_audio_input and audio_path and audio_path.is_file():
         try:
-
             transcript = await whisper_pipeline.run(
                 audio_path,
                 artifact_dir,
             )
-
         except whisper_pipeline.WhisperError as exc:
-
-            # Whisper.cpp is optional — if the binary or model is
-            # missing the pipeline degrades gracefully to OCR-only
-            # (no speech transcript) rather than failing the clip.
             import logging
             logging.getLogger(__name__).warning(
                 "Whisper transcription skipped: %s", exc,
@@ -366,5 +378,116 @@ async def run(
             "artifact_dir": str(
                 artifact_dir
             ),
+        },
+    }
+
+
+async def run_capture(
+    audio_source: Path | None,
+    keyframe_sources: list[Path],
+    artifact_dir: Path,
+    native_ui_text: str | None = None,
+    keyframe_interval_sec: float = 2.0,
+) -> dict[str, Any]:
+    """
+    Direct ingestion pipeline for the lightweight 2-second keyframe burst +
+    continuous microphone audio capture. Bypasses FFmpeg video demuxing.
+    """
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    ffmpeg = _require_binary(FFMPEG_BIN)
+
+    # 1. Process Audio with Whisper.cpp
+    audio_path: Path | None = None
+    transcript: list[dict[str, Any]] = []
+    audio_duration_sec = 0.0
+
+    if audio_source and audio_source.is_file() and audio_source.stat().st_size > 0:
+        audio_path = artifact_dir / "audio.wav"
+        await _run_command(
+            [
+                ffmpeg,
+                "-y",
+                "-i",
+                str(audio_source),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                str(audio_path),
+            ],
+            "FFmpeg audio conversion to 16kHz WAV",
+        )
+
+        try:
+            ffprobe = _require_binary(FFPROBE_BIN)
+            dur_out = await _run_command(
+                [
+                    ffprobe,
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    str(audio_path),
+                ],
+                "FFprobe audio duration",
+            )
+            audio_duration_sec = float(dur_out.strip())
+        except Exception:
+            audio_duration_sec = len(keyframe_sources) * keyframe_interval_sec
+
+        try:
+            transcript = await whisper_pipeline.run(
+                audio_path,
+                artifact_dir,
+            )
+        except whisper_pipeline.WhisperError as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Whisper transcription skipped for capture: %s", exc
+            )
+
+    # 2. Stage Candidate Keyframes (2.0-second interval)
+    candidate_keyframes = []
+    for index, src_path in enumerate(keyframe_sources, start=1):
+        target_path = artifact_dir / f"keyframe_{index:02d}.jpg"
+        if src_path != target_path:
+            shutil.copy2(src_path, target_path)
+
+        timestamp = round((index - 1) * keyframe_interval_sec, 2)
+        candidate_keyframes.append(
+            {
+                "frame_id": f"kf_{index:02d}",
+                "timestamp": timestamp,
+                "path": str(target_path),
+            }
+        )
+
+    # 3. PaddleOCR on keyframe images
+    try:
+        ocr_segments = await ocr_pipeline.run(candidate_keyframes)
+    except ocr_pipeline.OcrError as exc:
+        raise PreprocessingError(str(exc)) from exc
+
+    # 4. Retain native UI text in artifacts if provided, but do not inject
+    # raw accessibility navigation dumps directly into visual OCR segments.
+    total_duration = max(
+        audio_duration_sec,
+        len(candidate_keyframes) * keyframe_interval_sec,
+        1.0,
+    )
+
+    return {
+        "transcript": transcript,
+        "ocr_segments": ocr_segments,
+        "candidate_keyframes": candidate_keyframes,
+        "artifacts": {
+            "duration_sec": total_duration,
+            "audio_path": str(audio_path) if audio_path else None,
+            "artifact_dir": str(artifact_dir),
+            "native_ui_text": native_ui_text,
+            "source_video": None,
         },
     }

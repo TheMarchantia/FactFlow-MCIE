@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("FACTFLOW_GEMINI_MODEL", "gemini-3.6-flash")
+GEMINI_MODEL = os.getenv("FACTFLOW_GEMINI_MODEL", "gemini-flash-lite-latest")
 
 _API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 _VALID_VERDICTS = frozenset({"TRUE", "FALSE", "MISLEADING", "INCONCLUSIVE"})
@@ -48,6 +48,8 @@ outside the JSON — in this exact schema:
 {
     "verdict": "TRUE" | "FALSE" | "MISLEADING" | "INCONCLUSIVE",
     "confidence": <integer 0-100>,
+    "short_summary": "<concise 2-3 sentence summary for the quick preview card>",
+    "detailed_summary": "<detailed paragraph explaining the context, evidence found, and why the verdict was reached>",
     "summary": "<2-3 sentence explanation>",
     "sources": [{"name": "<source>", "url": "<URL>"}, ...]
 }
@@ -70,6 +72,8 @@ _INCONCLUSIVE_FALLBACK: Dict[str, Any] = {
     "verdict": "INCONCLUSIVE",
     "confidence": 0,
     "summary": "The reasoning provider could not produce a verdict.",
+    "short_summary": "The reasoning provider could not produce a verdict.",
+    "detailed_summary": "The reasoning provider was unable to verify the claim with sufficient evidence from online sources.",
     "sources": [],
 }
 
@@ -88,6 +92,12 @@ def _build_user_prompt(vp: Dict[str, Any]) -> str:
     if explicit:
         lines = "\n".join(f"  - {c}" for c in explicit)
         sections.append(f"EXPLICIT CLAIMS:\n{lines}")
+
+    implied = vp.get("implied_claims") or []
+    if implied:
+        imp_texts = [c["text"] if isinstance(c, dict) else str(c) for c in implied]
+        lines = "\n".join(f"  - {c}" for c in imp_texts)
+        sections.append(f"EXTRACTED / IMPLIED CLAIMS:\n{lines}")
 
     entities = vp.get("entities") or {}
     ent_lines: List[str] = []
@@ -165,24 +175,39 @@ def _normalise(raw: Dict[str, Any]) -> Dict[str, Any]:
     except (TypeError, ValueError):
         confidence = 50
 
-    summary = str(raw.get("summary", "")).strip() or "No summary available."
+    summary = str(raw.get("summary", "")).strip()
+    short_summary = str(raw.get("short_summary", "")).strip()
+    detailed_summary = str(raw.get("detailed_summary", "")).strip()
+
+    if not summary:
+        summary = short_summary or detailed_summary or "No summary available."
+    if not short_summary:
+        sentences = re.split(r'(?<=[.!?])\s+', summary)
+        short_summary = " ".join(sentences[:3]) if sentences else summary
+    if not detailed_summary:
+        detailed_summary = summary
 
     sources: List[Dict[str, str]] = []
     for s in (raw.get("sources") or [])[:5]:
-        if isinstance(s, dict) and s.get("name") and s.get("url"):
-            sources.append({"name": str(s["name"]), "url": str(s["url"])})
+        if isinstance(s, dict):
+            name = s.get("name") or s.get("title") or s.get("source") or s.get("site") or "Source"
+            url = s.get("url") or s.get("uri") or s.get("link") or ""
+            if url:
+                sources.append({"name": str(name).strip(), "url": str(url).strip()})
 
     return {
         "verdict": verdict,
         "confidence": confidence,
         "summary": summary,
+        "short_summary": short_summary,
+        "detailed_summary": detailed_summary,
         "sources": sources,
     }
 
 
 # ── Gemini REST API call ─────────────────────────────────────────────
 
-def _build_request_body(prompt: str, use_search: bool = True) -> Dict[str, Any]:
+def _build_request_body(prompt: str, use_search: bool = False) -> Dict[str, Any]:
     """Build the Gemini REST API generateContent request body."""
     body: Dict[str, Any] = {
         "systemInstruction": {
@@ -196,12 +221,20 @@ def _build_request_body(prompt: str, use_search: bool = True) -> Dict[str, Any]:
         ],
         "generationConfig": {
             "temperature": 0.2,
-            "maxOutputTokens": 1024,
+            "maxOutputTokens": 4096,
+            "responseMimeType": "application/json",
         },
     }
 
     if use_search:
-        body["tools"] = [{"googleSearchRetrieval": {}}]
+        body["tools"] = [{
+            "googleSearchRetrieval": {
+                "dynamicRetrievalConfig": {
+                    "mode": "MODE_DYNAMIC",
+                    "dynamicThreshold": 0.5
+                }
+            }
+        }]
 
     return body
 
@@ -212,7 +245,11 @@ def _extract_response_text(response_json: Dict[str, Any]) -> str:
         candidates = response_json.get("candidates", [])
         if not candidates:
             return ""
-        parts = candidates[0].get("content", {}).get("parts", [])
+        candidate = candidates[0]
+        if candidate.get("finishReason") == "MALFORMED_FUNCTION_CALL":
+            logger.warning("Gemini finished with MALFORMED_FUNCTION_CALL.")
+            return ""
+        parts = candidate.get("content", {}).get("parts", [])
         return "".join(part.get("text", "") for part in parts)
     except (IndexError, KeyError, TypeError):
         return ""
@@ -221,38 +258,33 @@ def _extract_response_text(response_json: Dict[str, Any]) -> str:
 async def _call_gemini(prompt: str) -> str:
     """
     Call the Gemini REST API via httpx.
-
-    Tries with Google Search grounding first; falls back to plain
-    generation if grounding is unavailable (wrong model, account
-    limitation, etc.).
+    
+    For a free-tier college project, we skip Google Search grounding 
+    to avoid HTTP 429 Quota Exceeded errors and rapid-retry RPM blocks.
+    We rely solely on gemini-3.8-flash's internal knowledge base.
     """
     import httpx
+    import os
 
-    url = f"{_API_BASE}/{GEMINI_MODEL}:generateContent"
-    params = {"key": GEMINI_API_KEY}
+    api_key = GEMINI_API_KEY or os.getenv("GEMINI_API_KEY", "")
+    model = os.getenv("FACTFLOW_GEMINI_MODEL", GEMINI_MODEL)
+    url = f"{_API_BASE}/{model}:generateContent"
+    params = {"key": api_key}
     headers = {"Content-Type": "application/json"}
 
     async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
-        # Attempt 1: with Google Search grounding
-        body = _build_request_body(prompt, use_search=True)
+        # 100% Free Tier safe: Ungrounded generation only
+        logger.debug("Calling Gemini with plain generation (no tools) for Free Tier compatibility.")
+        body = _build_request_body(prompt, use_search=False)
         response = await client.post(url, params=params, headers=headers, json=body)
-
-        if response.status_code != 200:
-            # Google Search grounding might not be available — retry without it
-            logger.debug(
-                "Gemini call with search grounding returned %d — retrying without.",
-                response.status_code,
-            )
-            body = _build_request_body(prompt, use_search=False)
-            response = await client.post(url, params=params, headers=headers, json=body)
-
+        
         if response.status_code != 200:
             error_detail = response.text[:500]
-            raise RuntimeError(
-                f"Gemini API returned HTTP {response.status_code}: {error_detail}"
-            )
+            logger.error("Gemini API returned HTTP %d: %s", response.status_code, error_detail)
+            raise RuntimeError(f"Gemini API HTTP {response.status_code}: {error_detail}")
 
-        return _extract_response_text(response.json())
+        text = _extract_response_text(response.json())
+        return text
 
 
 # ── main entry point ─────────────────────────────────────────────────
@@ -265,7 +297,9 @@ async def get_verdict(verification_package: Dict[str, Any]) -> Dict[str, Any]:
     Falls back to INCONCLUSIVE when the API key is not set, the model is
     unreachable, or the response cannot be parsed after retries.
     """
-    if not GEMINI_API_KEY:
+    import os
+    api_key = GEMINI_API_KEY or os.getenv("GEMINI_API_KEY", "")
+    if not api_key:
         logger.warning("GEMINI_API_KEY is not set — returning INCONCLUSIVE.")
         return {
             **_INCONCLUSIVE_FALLBACK,

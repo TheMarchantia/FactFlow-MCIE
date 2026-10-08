@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-
+from dotenv import load_dotenv
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(BACKEND_ROOT / ".env")
+
 UPLOADS_DIR = Path(os.getenv("FACTFLOW_UPLOADS_DIR", BACKEND_ROOT / "uploads")).resolve()
 DERIVED_DIR = Path(os.getenv("FACTFLOW_DERIVED_DIR", BACKEND_ROOT / "derived")).resolve()
 
